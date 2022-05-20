@@ -1,8 +1,8 @@
+import { proto } from '../../WAProto'
 import { GroupMetadata, ParticipantAction, SocketConfig } from '../Types'
 import { generateMessageID } from '../Utils'
 import { BinaryNode, getBinaryNodeChild, getBinaryNodeChildren, jidEncode, jidNormalizedUser } from '../WABinary'
 import { makeSocket } from './socket'
-import { proto } from '../../WAProto'
 
 export const makeGroupsSocket = (config: SocketConfig) => {
 	const sock = makeSocket(config)
@@ -99,7 +99,9 @@ export const makeGroupsSocket = (config: SocketConfig) => {
 			)
 			const node = getBinaryNodeChild(result, action)
 			const participantsAffected = getBinaryNodeChildren(node!, 'participant')
-			return participantsAffected.map(p => p.attrs.jid)
+			return participantsAffected.map(p => {
+				return { status: p.attrs.error || 200, jid: p.attrs.jid }
+			})
 		},
 		groupUpdateDescription: async(jid: string, description?: string) => {
 			const metadata = await groupMetadata(jid)
@@ -137,10 +139,10 @@ export const makeGroupsSocket = (config: SocketConfig) => {
 		},
 		groupAcceptInviteV4: async(jid: string, inviteMessage: proto.IGroupInviteMessage) => {
 			const results = await groupQuery(inviteMessage.groupJid, 'set', [{ tag: 'accept', attrs: {
-					code: inviteMessage.inviteCode,
-					expiration: inviteMessage.inviteExpiration.toString(),
-					admin: jid} }])
-			return results.attrs.from;
+				code: inviteMessage.inviteCode,
+				expiration: inviteMessage.inviteExpiration.toString(),
+				admin: jid } }])
+			return results.attrs.from
 		},
 		groupToggleEphemeral: async(jid: string, ephemeralExpiration: number) => {
 			const content: BinaryNode = ephemeralExpiration ?

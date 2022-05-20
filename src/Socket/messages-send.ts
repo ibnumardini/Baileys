@@ -2,13 +2,14 @@
 import NodeCache from 'node-cache'
 import { proto } from '../../WAProto'
 import { WA_DEFAULT_EPHEMERAL } from '../Defaults'
-import { AnyMessageContent, MediaConnInfo, MessageReceiptType, MessageRelayOptions, MiscMessageGenerationOptions, SocketConfig } from '../Types'
-import { encodeWAMessage, encryptSenderKeyMsgSignalProto, encryptSignalProto, extractDeviceJids, generateMessageID, generateWAMessage, getWAUploadToServer, jidToSignalProtocolAddress, parseAndInjectE2ESessions, unixTimestampSeconds } from '../Utils'
+import { AnyMessageContent, MediaConnInfo, MessageReceiptType, MessageRelayOptions, MiscMessageGenerationOptions, SocketConfig, WAMessageKey } from '../Types'
+import { aggregateMessageKeysNotFromMe, encodeWAMessage, encryptSenderKeyMsgSignalProto, encryptSignalProto, extractDeviceJids, generateMessageID, generateWAMessage, getWAUploadToServer, jidToSignalProtocolAddress, parseAndInjectE2ESessions, unixTimestampSeconds } from '../Utils'
+import { getUrlInfo } from '../Utils/link-preview'
 import { BinaryNode, BinaryNodeAttributes, getBinaryNodeChild, getBinaryNodeChildren, isJidGroup, isJidUser, jidDecode, jidEncode, jidNormalizedUser, JidWithDevice, reduceBinaryNodeToDictionary, S_WHATSAPP_NET } from '../WABinary'
 import { makeGroupsSocket } from './groups'
 
 export const makeMessagesSocket = (config: SocketConfig) => {
-	const { logger } = config
+	const { logger, linkPreviewImageThumbnailWidth } = config
 	const sock = makeGroupsSocket(config)
 	const {
 		ev,
@@ -130,6 +131,14 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 		const readType = privacySettings.readreceipts === 'all' ? 'read' : 'read-self'
 		return sendReceipt(jid, participant, messageIds, readType)
 	}
+
+	/** Bulk read messages. Keys can be from different chats & participants */
+	const readMessages = async(keys: WAMessageKey[]) => {
+		const recps = aggregateMessageKeysNotFromMe(keys)
+		for(const { jid, participant, messageIds } of recps) {
+			await sendReadReceipt(jid, participant, messageIds)
+		}
+ 	}
 
 	const getUSyncDevices = async(jids: string[], ignoreZeroDevices: boolean) => {
 		const deviceResults: JidWithDevice[] = []
@@ -447,6 +456,7 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 		relayMessage,
 		sendReceipt,
 		sendReadReceipt,
+		readMessages,
 		refreshMediaConn,
 	    waUploadToServer,
 		fetchPrivacySettings,
@@ -475,7 +485,10 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 						logger,
 						userJid,
 						// multi-device does not have this yet
-						//getUrlInfo: generateUrlInfo,
+						getUrlInfo: text => getUrlInfo(
+							text,
+							{ thumbnailWidth: linkPreviewImageThumbnailWidth, timeoutMs: 3_000 }
+						),
 						upload: waUploadToServer,
 						mediaCache: config.mediaCache,
 						...options,

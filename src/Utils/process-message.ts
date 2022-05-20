@@ -1,20 +1,28 @@
 import type { Logger } from 'pino'
 import { proto } from '../../WAProto'
-import { BaileysEventMap, Chat, GroupMetadata, ParticipantAction, SignalKeyStoreWithTransaction, WAMessageStubType } from '../Types'
+import { AccountSettings, BaileysEventMap, Chat, GroupMetadata, ParticipantAction, SignalKeyStoreWithTransaction, WAMessageStubType } from '../Types'
 import { downloadAndProcessHistorySyncNotification, normalizeMessageContent, toNumber } from '../Utils'
 import { areJidsSameUser, jidNormalizedUser } from '../WABinary'
 
 type ProcessMessageContext = {
-	historyCache: Set<string>,
-	meId: string,
-	keyStore: SignalKeyStoreWithTransaction,
+	historyCache: Set<string>
+	meId: string
+	keyStore: SignalKeyStoreWithTransaction
+	accountSettings: AccountSettings
 	logger?: Logger
 	treatCiphertextMessagesAsReal?: boolean
 }
 
+const MSG_MISSED_CALL_TYPES = new Set([
+	WAMessageStubType.CALL_MISSED_GROUP_VIDEO,
+	WAMessageStubType.CALL_MISSED_GROUP_VOICE,
+	WAMessageStubType.CALL_MISSED_VIDEO,
+	WAMessageStubType.CALL_MISSED_VOICE
+])
+
 const processMessage = async(
 	message: proto.IWebMessageInfo,
-	{ historyCache, meId, keyStore, logger, treatCiphertextMessagesAsReal }: ProcessMessageContext
+	{ historyCache, meId, keyStore, accountSettings, logger, treatCiphertextMessagesAsReal }: ProcessMessageContext
 ) => {
 	const map: Partial<BaileysEventMap<any>> = { }
 
@@ -23,15 +31,22 @@ const processMessage = async(
 	const normalizedContent = !!message.message && normalizeMessageContent(message.message)
 	if(
 		(
-			!!normalizedContent ||
-			(message.messageStubType === WAMessageStubType.CIPHERTEXT && treatCiphertextMessagesAsReal)
+			!!normalizedContent
+			|| MSG_MISSED_CALL_TYPES.has(message.messageStubType)
+			|| (message.messageStubType === WAMessageStubType.CIPHERTEXT && treatCiphertextMessagesAsReal)
 		)
 		&& !normalizedContent?.protocolMessage
 		&& !normalizedContent?.reactionMessage
 	) {
 		chat.conversationTimestamp = toNumber(message.messageTimestamp)
-		if(!message.key.fromMe) {
+		// only increment unread count if not CIPHERTEXT and from another person
+		if(!message.key.fromMe && !message.messageStubType) {
 			chat.unreadCount = (chat.unreadCount || 0) + 1
+		}
+
+		if(accountSettings?.unarchiveChats) {
+			chat.archive = false
+			chat.readOnly = false
 		}
 	}
 
@@ -106,7 +121,13 @@ const processMessage = async(
 			key: message.key,
 		}
 		const operation = content.reactionMessage?.text ? 'add' : 'remove'
-		map['messages.reaction'] = { reaction, key: content.reactionMessage!.key!, operation }
+		const msgKey = content.reactionMessage!.key!
+		if(!message.key.fromMe) {
+			msgKey.remoteJid = message.key.remoteJid
+			msgKey.fromMe = !msgKey.fromMe
+		}
+
+		map['messages.reaction'] = { reaction, key: msgKey, operation }
 	} else if(message.messageStubType) {
 		const jid = message.key!.remoteJid!
 		//let actor = whatsappID (message.participant)
@@ -140,6 +161,14 @@ const processMessage = async(
 			}
 
 			emitParticipantsUpdate('add')
+			break
+		case WAMessageStubType.GROUP_PARTICIPANT_DEMOTE:
+			participants = message.messageStubParameters
+			emitParticipantsUpdate('demote')
+			break
+		case WAMessageStubType.GROUP_PARTICIPANT_PROMOTE:
+			participants = message.messageStubParameters
+			emitParticipantsUpdate('promote')
 			break
 		case WAMessageStubType.GROUP_CHANGE_ANNOUNCE:
 			const announceValue = message.messageStubParameters[0]

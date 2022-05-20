@@ -24,12 +24,13 @@ export const makeChatsSocket = (config: SocketConfig) => {
 	} = sock
 
 	const mutationMutex = makeMutex()
-	/// helper function to fetch an app state sync key
+	/** helper function to fetch the given app state sync key */
 	const getAppStateSyncKey = async(keyId: string) => {
 		const { [keyId]: key } = await authState.keys.get('app-state-sync-key', [keyId])
 		return key
 	}
 
+	/** helper function to run a generic IQ query */
 	const interactiveQuery = async(userNodes: BinaryNode[], queryNode: BinaryNode) => {
 		const result = await query({
 			tag: 'iq',
@@ -109,6 +110,7 @@ export const makeChatsSocket = (config: SocketConfig) => {
 		}
 	}
 
+	/** update the profile picture for yourself or a group */
 	const updateProfilePicture = async(jid: string, content: WAMediaUpload) => {
 		const { img } = await generateProfilePicture(content)
 		await query({
@@ -296,7 +298,10 @@ export const makeChatsSocket = (config: SocketConfig) => {
 								const { state: newState, mutations } = await decodeSyncdSnapshot(name, snapshot, getAppStateSyncKey, initialVersionMap[name])
 								states[name] = newState
 
-								logger.info(`restored state of ${name} from snapshot to v${newState.version} with ${mutations.length} mutations`)
+								logger.info(
+									{ mutations: logger.level === 'trace' ? mutations : undefined },
+									`restored state of ${name} from snapshot to v${newState.version} with ${mutations.length} mutations`
+								)
 
 								await authState.keys.set({ 'app-state-sync-version': { [name]: newState } })
 
@@ -461,6 +466,10 @@ export const makeChatsSocket = (config: SocketConfig) => {
 	const processSyncActionsLocal = (actions: ChatMutation[]) => {
 		const events = processSyncActions(actions, authState.creds.me!, logger)
 		emitEventsFromMap(events)
+		// resend available presence to update name on servers
+		if(events['creds.update']?.me?.name) {
+			sendPresenceUpdate('available')
+		}
 	}
 
 	const appPatch = async(patchCreate: WAPatchCreate) => {
@@ -537,7 +546,6 @@ export const makeChatsSocket = (config: SocketConfig) => {
 				to: S_WHATSAPP_NET,
 				xmlns: 'abt',
 				type: 'get',
-				id: generateMessageTag(),
 			},
 			content: [
 				{ tag: 'props', attrs: { protocol: '1' } }
@@ -564,7 +572,6 @@ export const makeChatsSocket = (config: SocketConfig) => {
 				to: S_WHATSAPP_NET,
 				xmlns: 'w',
 				type: 'get',
-				id: generateMessageTag(),
 			},
 			content: [
 				{ tag: 'props', attrs: { } }

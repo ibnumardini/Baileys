@@ -17,8 +17,9 @@ import {
 	WAMessageContent,
 	WAMessageStatus,
 	WAProto,
-	WATextMessage
+	WATextMessage,
 } from '../Types'
+import { jidNormalizedUser } from '../WABinary'
 import { generateMessageID, unixTimestampSeconds } from './generics'
 import { downloadContentFromMessage, encryptedStream, generateThumbnail, getAudioDuration, MediaDownloadOptions } from './messages-media'
 
@@ -245,19 +246,25 @@ export const generateWAMessageContent = async(
 ) => {
 	let m: WAMessageContent = {}
 	if('text' in message) {
-		const extContent = { ...message } as WATextMessage
-		if(!!options.getUrlInfo && message.text.match(URL_REGEX)) {
+		const extContent = { text: message.text } as WATextMessage
+
+		let urlInfo = message.linkPreview
+		const matchedUrls = message.text.match(URL_REGEX)
+		if(!urlInfo && !!options.getUrlInfo && matchedUrls) {
 			try {
-				const data = await options.getUrlInfo(message.text)
-				extContent.canonicalUrl = data['canonical-url']
-				extContent.matchedText = data['matched-text']
-				extContent.jpegThumbnail = data.jpegThumbnail
-				extContent.description = data.description
-				extContent.title = data.title
-				extContent.previewType = 0
+				urlInfo = await options.getUrlInfo(matchedUrls[0])
 			} catch(error) { // ignore if fails
 				options.logger?.warn({ trace: error.stack }, 'url generation failed')
 			}
+		}
+
+		if(urlInfo) {
+			extContent.canonicalUrl = urlInfo['canonical-url']
+			extContent.matchedText = urlInfo['matched-text']
+			extContent.jpegThumbnail = urlInfo.jpegThumbnail
+			extContent.description = urlInfo.description
+			extContent.title = urlInfo.title
+			extContent.previewType = 0
 		}
 
 		m.extendedTextMessage = extContent
@@ -322,28 +329,30 @@ export const generateWAMessageContent = async(
 
 		m = { buttonsMessage }
 	} else if('templateButtons' in message && !!message.templateButtons) {
-		const templateMessage: proto.ITemplateMessage = {
-			hydratedTemplate: {
-				hydratedButtons: message.templateButtons
-			}
+		const msg: proto.IHydratedFourRowTemplate = {
+			hydratedButtons: message.templateButtons
 		}
 
 		if('text' in message) {
-			templateMessage.hydratedTemplate.hydratedContentText = message.text
+			msg.hydratedContentText = message.text
 		} else {
 
 			if('caption' in message) {
-				templateMessage.hydratedTemplate.hydratedContentText = message.caption
+				msg.hydratedContentText = message.caption
 			}
 
-			Object.assign(templateMessage.hydratedTemplate, m)
+			Object.assign(msg, m)
 		}
 
 		if('footer' in message && !!message.footer) {
-			templateMessage.hydratedTemplate.hydratedFooterText = message.footer
+			msg.hydratedFooterText = message.footer
 		}
 
-		m = { templateMessage }
+		m = {
+			templateMessage: {
+				hydratedTemplate: msg
+			}
+		}
 	}
 
 	if('sections' in message && !!message.sections) {
@@ -388,16 +397,28 @@ export const generateWAMessageFromContent = (
 	if(quoted) {
 		const participant = quoted.key.fromMe ? userJid : (quoted.participant || quoted.key.participant || quoted.key.remoteJid)
 
-		message[key].contextInfo = message[key].contextInfo || { }
-		message[key].contextInfo.participant = participant
-		message[key].contextInfo.stanzaId = quoted.key.id
-		message[key].contextInfo.quotedMessage = quoted.message
+		let quotedMsg = normalizeMessageContent(quoted.message)
+		const msgType = getContentType(quotedMsg)
+		// strip any redundant properties
+		quotedMsg = proto.Message.fromObject({ [msgType]: quotedMsg[msgType] })
+
+		const quotedContent = quotedMsg[msgType]
+		if(typeof quotedContent === 'object' && quotedContent && 'contextInfo' in quotedContent) {
+			delete quotedContent.contextInfo
+		}
+
+		const contextInfo: proto.IContextInfo = message[key].contextInfo || { }
+		contextInfo.participant = jidNormalizedUser(participant)
+		contextInfo.stanzaId = quoted.key.id
+		contextInfo.quotedMessage = quotedMsg
 
 		// if a participant is quoted, then it must be a group
 		// hence, remoteJid of group must also be entered
 		if(quoted.key.participant || quoted.participant) {
-			message[key].contextInfo.remoteJid = quoted.key.remoteJid
+			contextInfo.remoteJid = quoted.key.remoteJid
 		}
+
+		message[key].contextInfo = contextInfo
 	}
 
 	if(
@@ -526,6 +547,7 @@ export const getDevice = (id: string) => {
 	return deviceType
 }
 
+/** Upserts a receipt in the message */
 export const updateMessageWithReceipt = (msg: WAMessage, receipt: MessageUserReceipt) => {
 	msg.userReceipt = msg.userReceipt || []
 	const recp = msg.userReceipt.find(m => m.userJid === receipt.userJid)
@@ -534,6 +556,27 @@ export const updateMessageWithReceipt = (msg: WAMessage, receipt: MessageUserRec
 	} else {
 		msg.userReceipt.push(receipt)
 	}
+}
+
+/** Given a list of message keys, aggregates them by chat & sender. Useful for sending read receipts in bulk */
+export const aggregateMessageKeysNotFromMe = (keys: proto.IMessageKey[]) => {
+	const keyMap: { [id: string]: { jid: string, participant: string | undefined, messageIds: string[] } } = { }
+	for(const { remoteJid, id, participant, fromMe } of keys) {
+		if(!fromMe) {
+			const uqKey = `${remoteJid}:${participant || ''}`
+			if(!keyMap[uqKey]) {
+				keyMap[uqKey] = {
+					jid: remoteJid,
+					participant,
+					messageIds: []
+				}
+			}
+
+			keyMap[uqKey].messageIds.push(id)
+		}
+	}
+
+	return Object.values(keyMap)
 }
 
 /**
